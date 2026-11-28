@@ -1,56 +1,179 @@
-name: High-Speed Windows RDP (Azure VM via Tailscale)
+name: Auto Shortlink Runner (Zero RDP)
 
 on:
   workflow_dispatch:
     inputs:
-      tailscale_key:
-        description: 'Enter your Tailscale Auth Key (tskey-auth-...)'
+      target_url:
+        description: 'Target shortlink URL'
         required: true
-        default: ''
+        default: 'https://ouo.io/QyuW7c'
 
 jobs:
-  build:
+  run-browser:
     runs-on: windows-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 5
     steps:
-      - name: Enable Windows Remote Desktop (RDP) & Configure User
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-          net user runneradmin "Password123!"
-          net localgroup "Remote Desktop Users" runneradmin /add 2>&1 | Out-Null
-          $LASTEXITCODE = 0
+      - name: Check VM Public IP
+        run: curl.exe -s https://api.ipify.org
 
-      - name: Install & Connect Tailscale
+      - name: Install Dependencies
+        run: pip install DrissionPage pyautogui
+
+      - name: Run Human-Like Chrome Automation
         env:
-          TS_AUTHKEY: ${{ github.event.inputs.tailscale_key }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
-          Write-Output "::add-mask::$env:TS_AUTHKEY"
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
-          Start-Process -FilePath "tailscale-setup.exe" -ArgumentList "/quiet" -Wait
-          Start-Sleep -Seconds 5
-          $tailscaleExe = "C:\Program Files\Tailscale\tailscale.exe"
-          & $tailscaleExe up --authkey="$env:TS_AUTHKEY" --accept-routes
-          Start-Sleep -Seconds 3
-          $ip = (& $tailscaleExe ip -4)
+          @'
+          import os, time, random, ctypes
+          import pyautogui
+          from DrissionPage import ChromiumPage, ChromiumOptions
 
-          Write-Host "==================================================" -ForegroundColor Cyan
-          Write-Host "WINDOWS SERVER RDP IS READY!" -ForegroundColor Green
-          Write-Host "==================================================" -ForegroundColor Cyan
-          Write-Host "RDP IP Address : $ip" -ForegroundColor Yellow
-          Write-Host "Username       : runneradmin" -ForegroundColor White
-          Write-Host "Password       : Password123!" -ForegroundColor White
-          Write-Host "Duration       : 6 Hours (Max Limit)" -ForegroundColor Magenta
-          Write-Host "==================================================" -ForegroundColor Cyan
+          try:
+              ctypes.windll.shcore.SetProcessDpiAwareness(2)
+          except Exception:
+              pass
+          pyautogui.FAILSAFE = False
 
-      - name: Keep-Alive Runner (Up to 6 Hours Active)
-        run: |
-          $totalMinutes = 350
-          for ($i = 1; $i -le $totalMinutes; $i++) {
-              Start-Sleep -Seconds 60
-              if ($i % 10 -eq 0) {
-                  Write-Host "Windows RDP Active: $i / $totalMinutes minutes"
-              }
-          }
+          def click_cf_os(page):
+              anchor = (
+                  page.ele('text:This website uses a security service', timeout=1)
+                  or page.ele('text:Performing security verification', timeout=1)
+              )
+              if anchor:
+                  ax, ay = anchor.rect.screen_location
+                  aw, ah = anchor.rect.size
+                  if ah > 0:
+                      target_x = int(ax + 22 + random.randint(-3, 3))
+                      target_y = int(ay + ah + 62 + random.randint(-3, 3))
+                      print(f'[+] Moving real mouse to CF checkbox ({target_x}, {target_y})...', flush=True)
+                      pyautogui.moveTo(target_x - random.randint(40, 90), target_y + random.randint(-30, 30), duration=0.3)
+                      pyautogui.moveTo(target_x, target_y, duration=random.uniform(0.4, 0.7))
+                      time.sleep(random.uniform(0.1, 0.25))
+                      pyautogui.click()
+                      return True
+
+              for sel in ('css:iframe[src*="challenges.cloudflare.com"]', 'css:div.cf-turnstile'):
+                  el = page.ele(sel, timeout=0.5)
+                  if el and el.rect.size[0] > 0 and el.rect.size[1] > 0:
+                      ex, ey = el.rect.screen_location
+                      target_x = int(ex + 28)
+                      target_y = int(ey + 32)
+                      print(f'[+] Fallback OS click on CF widget ({target_x}, {target_y})...', flush=True)
+                      pyautogui.moveTo(target_x, target_y, duration=0.5)
+                      pyautogui.click()
+                      return True
+              return False
+
+          url = os.environ['TARGET_URL']
+          page = None
+          for attempt in range(1, 4):
+              try:
+                  co = ChromiumOptions().auto_port()
+                  co.set_argument('--start-maximized')
+                  co.set_argument('--disable-popup-blocking')
+                  co.set_argument('--disable-notifications')
+                  co.set_argument('--no-first-run')
+                  co.set_argument('--no-default-browser-check')
+                  co.set_argument('--no-sandbox')
+                  co.set_argument('--disable-gpu')
+                  page = ChromiumPage(co)
+                  break
+              except Exception as e:
+                  print(f'[!] Chrome launch attempt {attempt}/3 failed: {e}', flush=True)
+                  os.system('taskkill /F /IM chrome.exe >nul 2>&1')
+                  time.sleep(3)
+
+          if not page:
+              raise RuntimeError('Failed to connect to Chrome after 3 attempts.')
+
+          print(f'[*] Opening {url}...', flush=True)
+          page.get(url)
+          main_tab = page.tab_id
+          start = time.time()
+          last_log = 0
+
+          try:
+              while time.time() - start < 90:
+                  # 1. Handle ad tabs / popup windows
+                  if len(page.tab_ids) > 1:
+                      for tid in list(page.tab_ids):
+                          if tid != main_tab:
+                              try:
+                                  ad_tab = page.get_tab(tid)
+                                  ad_url = (ad_tab.url or '').lower()
+                                  if 'youtube.com' in ad_url or 'youtu.be' in ad_url:
+                                      print(f'[+] Destination opened in new tab: {ad_tab.url}', flush=True)
+                                      time.sleep(random.uniform(4.0, 6.0))
+                                      raise SystemExit(0)
+                                  wait_s = random.uniform(5.0, 7.0)
+                                  print(f'[*] Ad tab ({ad_url[:40]}...) — waiting {wait_s:.1f}s...', flush=True)
+                                  time.sleep(wait_s)
+                                  ad_tab.close()
+                              except SystemExit:
+                                  raise
+                              except Exception:
+                                  pass
+                      page.activate_tab(main_tab)
+                      time.sleep(1.5)
+
+                  cur_url = (page.url or '').lower()
+                  cur_title = (page.title or '').strip()
+
+                  if time.time() - last_log >= 8:
+                      print(f'[*] Live -> Title: "{cur_title}" | URL: {cur_url}', flush=True)
+                      last_log = time.time()
+
+                  # 2. Check if YouTube destination is reached
+                  if 'youtube.com' in cur_url or 'youtu.be' in cur_url:
+                      print(f'[+] Final YouTube destination reached: {page.url}', flush=True)
+                      time.sleep(random.uniform(4.0, 6.0))
+                      break
+
+                  # 3. Handle Cloudflare Turnstile with real OS click
+                  if 'just a moment' in cur_title.lower() or page.ele('text:Performing security verification', timeout=0.5):
+                      if click_cf_os(page):
+                          time.sleep(random.uniform(6.0, 8.0))
+                      else:
+                          time.sleep(3.0)
+                      continue
+
+                  # 4. Step 1: Click I'M A HUMAN
+                  if '/go/' not in cur_url:
+                      human_btn = (
+                          page.ele('#btn-main', timeout=0.5)
+                          or page.ele('tag:button@@text():HUMAN', timeout=0.5)
+                          or page.ele("text:I'M A HUMAN", timeout=0.5)
+                      )
+                      if human_btn and human_btn.states.is_displayed:
+                          time.sleep(random.uniform(2.0, 3.5))
+                          print("[+] Clicking I'M A HUMAN...", flush=True)
+                          human_btn.click()
+                          time.sleep(random.uniform(3.0, 4.5))
+                          continue
+
+                  # 5. Step 2 (/go/ page): Wait for countdown, then click GET LINK
+                  if '/go/' in cur_url:
+                      page_html = page.html or ''
+                      if '>3<' in page_html or '>2<' in page_html or '>1<' in page_html:
+                          print('[*] Waiting for countdown...', flush=True)
+                          time.sleep(1.5)
+                          continue
+
+                      get_btn = (
+                          page.ele('#btn-main', timeout=0.5)
+                          or page.ele('tag:button@@text():GET LINK', timeout=0.5)
+                          or page.ele('text:GET LINK', timeout=0.5)
+                      )
+                      if get_btn and get_btn.states.is_displayed:
+                          print('[+] Clicking GET LINK...', flush=True)
+                          time.sleep(random.uniform(1.0, 2.0))
+                          get_btn.click()
+                          time.sleep(random.uniform(3.0, 4.5))
+                          continue
+
+                  time.sleep(2)
+          finally:
+              page.quit()
+              print('[+] Done. VM shutting down.', flush=True)
+          '@ | Set-Content -Path bot.py -Encoding UTF8
+          python -u bot.py
