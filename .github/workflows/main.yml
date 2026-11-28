@@ -22,9 +22,11 @@ jobs:
       - name: Run Human-Like Chrome Automation
         env:
           TARGET_URL: ${{ github.event.inputs.target_url }}
+          PYTHONUTF8: '1'
         run: |
           @'
           import os, sys, time, random, ctypes
+          from urllib.parse import urlparse
           import pyautogui
           from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -33,6 +35,14 @@ jobs:
           except Exception:
               pass
           pyautogui.FAILSAFE = False
+
+          def is_youtube_destination(raw_url):
+              """Returns True only if the actual hostname is YouTube (prevents ad query-string false positives)."""
+              try:
+                  host = (urlparse(raw_url or '').hostname or '').lower()
+                  return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
+              except Exception:
+                  return False
 
           def click_cf_os(page):
               """Finds the HTML text above Turnstile and performs a real OS mouse click on the checkbox."""
@@ -125,6 +135,7 @@ jobs:
           last_url = url
           cf_attempts = 0
           reached_youtube = False
+          final_yt_url = ''
 
           try:
               while time.time() - start < 130:
@@ -134,14 +145,15 @@ jobs:
                           if tid != main_tab:
                               try:
                                   ad_tab = page.get_tab(tid)
-                                  ad_url = (ad_tab.url or '').lower()
-                                  if 'youtube.com' in ad_url or 'youtu.be' in ad_url:
-                                      print(f'[+] Destination opened in new tab: {ad_tab.url}', flush=True)
+                                  ad_url = ad_tab.url or ''
+                                  if is_youtube_destination(ad_url):
+                                      final_yt_url = ad_url
+                                      print(f'[+] Destination opened in new tab: {final_yt_url}', flush=True)
                                       time.sleep(random.uniform(5.0, 8.0))
                                       reached_youtube = True
                                       break
                                   wait_s = random.uniform(9.0, 13.0)
-                                  print(f'[*] Ad tab ({ad_url[:45]}...) — waiting {wait_s:.1f}s for impression...', flush=True)
+                                  print(f'[*] Ad tab ({ad_url[:45]}...) - waiting {wait_s:.1f}s for impression...', flush=True)
                                   time.sleep(wait_s)
                                   ad_tab.close()
                               except Exception:
@@ -154,7 +166,8 @@ jobs:
                           pass
                       time.sleep(1.5)
 
-                  cur_url = (page.url or '').lower()
+                  cur_url = page.url or ''
+                  cur_url_lower = cur_url.lower()
                   cur_title = (page.title or '').strip()
                   last_url = cur_url
 
@@ -163,9 +176,10 @@ jobs:
                       print(f'[*] [{elapsed}s] Title: "{cur_title}" | URL: {cur_url}', flush=True)
                       last_log = time.time()
 
-                  # 2. Check if YouTube destination is reached
-                  if 'youtube.com' in cur_url or 'youtu.be' in cur_url:
-                      print(f'[+] Final YouTube destination reached: {page.url}', flush=True)
+                  # 2. Check if strict YouTube destination is reached
+                  if is_youtube_destination(cur_url):
+                      final_yt_url = cur_url
+                      print(f'[+] Final YouTube destination reached: {final_yt_url}', flush=True)
                       time.sleep(random.uniform(5.0, 8.0))
                       reached_youtube = True
                       break
@@ -173,7 +187,7 @@ jobs:
                   # 3. Handle Cloudflare Turnstile with real OS click + stuck-challenge refresh
                   if 'just a moment' in cur_title.lower() or page.ele('text:Performing security verification', timeout=0.5):
                       if cf_attempts >= 3:
-                          print('[*] Turnstile stuck after 3 clicks — refreshing page...', flush=True)
+                          print('[*] Turnstile stuck after 3 clicks - refreshing page...', flush=True)
                           page.refresh()
                           cf_attempts = 0
                           time.sleep(5.0)
@@ -188,7 +202,7 @@ jobs:
                   cf_attempts = 0
 
                   # 4. Step 1: Click I'M A HUMAN
-                  if '/go/' not in cur_url:
+                  if '/go/' not in cur_url_lower:
                       human_btn = (
                           page.ele('#btn-main', timeout=0.5)
                           or page.ele('tag:button@@text():HUMAN', timeout=0.5)
@@ -206,7 +220,7 @@ jobs:
                           continue
 
                   # 5. Step 2 (/go/ page): Wait for countdown, then click GET LINK
-                  if '/go/' in cur_url:
+                  if '/go/' in cur_url_lower:
                       page_html = page.html or ''
                       if '>3<' in page_html or '>2<' in page_html or '>1<' in page_html:
                           print('[*] Waiting for countdown...', flush=True)
@@ -237,6 +251,6 @@ jobs:
               print(f'[!] FAILED: Timed out after 130s before reaching YouTube. Last URL: {last_url}', flush=True)
               sys.exit(1)
 
-          print('[+] SUCCESS: View completed cleanly. VM shutting down.', flush=True)
+          print(f'[+] SUCCESS: Verified YouTube destination ({final_yt_url}). VM shutting down.', flush=True)
           '@ | Set-Content -Path bot.py -Encoding UTF8
           python -u bot.py
