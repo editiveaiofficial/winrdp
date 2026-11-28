@@ -7,6 +7,10 @@ on:
         description: 'Target shortlink URL'
         required: true
         default: 'https://ouo.io/QyuW7c'
+      expected_domain:
+        description: 'Optional destination domain (leave blank to accept any non-ouo site after GET LINK)'
+        required: false
+        default: ''
 
 jobs:
   run-browser:
@@ -22,6 +26,7 @@ jobs:
       - name: Run Human-Like Chrome Automation
         env:
           TARGET_URL: ${{ github.event.inputs.target_url }}
+          EXPECTED_DOMAIN: ${{ github.event.inputs.expected_domain }}
           PYTHONUTF8: '1'
         run: |
           @'
@@ -36,13 +41,35 @@ jobs:
               pass
           pyautogui.FAILSAFE = False
 
-          def is_youtube_destination(raw_url):
-              """Returns True only if the actual hostname is YouTube (prevents ad query-string false positives)."""
+          OUO_DOMAINS = ('ouo.io', 'ouo.press')
+          AD_SKIP_DOMAINS = ('srvqk.com', 'primisemets.com', 'frs2c.com', 'doubleclick.net', 'googlesyndication.com')
+          EXPECTED_DOMAIN = os.environ.get('EXPECTED_DOMAIN', '').strip().lower()
+
+          def host_matches(host, domain):
+              return host == domain or host.endswith('.' + domain)
+
+          def is_destination_reached(raw_url, clicked_get_link):
+              """Returns True once GET LINK has been clicked and the main tab lands on a non-ouo destination."""
+              if not raw_url:
+                  return False
+              low = raw_url.lower().strip()
+              if low.startswith(('about:', 'chrome', 'edge:', 'data:')):
+                  return False
               try:
-                  host = (urlparse(raw_url or '').hostname or '').lower()
-                  return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
+                  host = (urlparse(low).hostname or '').lower()
               except Exception:
                   return False
+              if not host:
+                  return False
+              if any(host_matches(host, d) for d in OUO_DOMAINS):
+                  return False
+              if EXPECTED_DOMAIN:
+                  return host_matches(host, EXPECTED_DOMAIN)
+              if not clicked_get_link:
+                  return False
+              if any(host_matches(host, d) for d in AD_SKIP_DOMAINS) or '/redirect?' in low:
+                  return False
+              return True
 
           def click_cf_os(page):
               """Finds the HTML text above Turnstile and performs a real OS mouse click on the checkbox."""
@@ -89,7 +116,7 @@ jobs:
                       return True
               return False
 
-          url = os.environ['TARGET_URL']
+          url = os.environ['TARGET_URL'].strip()
           page = None
           w, h = random.choice([(1024, 768), (1000, 750), (980, 730), (960, 720)])
 
@@ -134,8 +161,9 @@ jobs:
           last_log = 0
           last_url = url
           cf_attempts = 0
-          reached_youtube = False
-          final_yt_url = ''
+          clicked_get_link = False
+          reached_destination = False
+          final_dest_url = ''
 
           try:
               while time.time() - start < 130:
@@ -146,11 +174,11 @@ jobs:
                               try:
                                   ad_tab = page.get_tab(tid)
                                   ad_url = ad_tab.url or ''
-                                  if is_youtube_destination(ad_url):
-                                      final_yt_url = ad_url
-                                      print(f'[+] Destination opened in new tab: {final_yt_url}', flush=True)
+                                  if EXPECTED_DOMAIN and is_destination_reached(ad_url, clicked_get_link):
+                                      final_dest_url = ad_url
+                                      print(f'[+] Destination opened in new tab: {final_dest_url}', flush=True)
                                       time.sleep(random.uniform(5.0, 8.0))
-                                      reached_youtube = True
+                                      reached_destination = True
                                       break
                                   wait_s = random.uniform(9.0, 13.0)
                                   print(f'[*] Ad tab ({ad_url[:45]}...) - waiting {wait_s:.1f}s for impression...', flush=True)
@@ -158,7 +186,7 @@ jobs:
                                   ad_tab.close()
                               except Exception:
                                   pass
-                      if reached_youtube:
+                      if reached_destination:
                           break
                       try:
                           page.activate_tab(main_tab)
@@ -176,12 +204,12 @@ jobs:
                       print(f'[*] [{elapsed}s] Title: "{cur_title}" | URL: {cur_url}', flush=True)
                       last_log = time.time()
 
-                  # 2. Check if strict YouTube destination is reached
-                  if is_youtube_destination(cur_url):
-                      final_yt_url = cur_url
-                      print(f'[+] Final YouTube destination reached: {final_yt_url}', flush=True)
+                  # 2. Check if final destination is reached on main tab
+                  if is_destination_reached(cur_url, clicked_get_link):
+                      final_dest_url = cur_url
+                      print(f'[+] Final destination reached: {final_dest_url}', flush=True)
                       time.sleep(random.uniform(5.0, 8.0))
-                      reached_youtube = True
+                      reached_destination = True
                       break
 
                   # 3. Handle Cloudflare Turnstile with real OS click + stuck-challenge refresh
@@ -240,6 +268,7 @@ jobs:
                           except Exception:
                               pass
                           get_btn.click()
+                          clicked_get_link = True
                           time.sleep(random.uniform(3.0, 4.5))
                           continue
 
@@ -247,10 +276,10 @@ jobs:
           finally:
               page.quit()
 
-          if not reached_youtube:
-              print(f'[!] FAILED: Timed out after 130s before reaching YouTube. Last URL: {last_url}', flush=True)
+          if not reached_destination:
+              print(f'[!] FAILED: Timed out after 130s before reaching destination. Last URL: {last_url}', flush=True)
               sys.exit(1)
 
-          print(f'[+] SUCCESS: Verified YouTube destination ({final_yt_url}). VM shutting down.', flush=True)
+          print(f'[+] SUCCESS: Verified destination ({final_dest_url}). VM shutting down.', flush=True)
           '@ | Set-Content -Path bot.py -Encoding UTF8
           python -u bot.py
